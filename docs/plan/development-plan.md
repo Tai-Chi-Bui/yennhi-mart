@@ -36,22 +36,66 @@ This plan outlines the development of a large-scale, microservices-based grocery
 ## Development Phases
 The plan is divided into phases, with estimated durations assuming 20–30 hours/week of solo development. Timelines are approximate and can be adjusted based on progress.
 
-### Phase 1: Project Setup and Infrastructure (2–3 Weeks)
-**Goal**: Establish the development environment, Kubernetes cluster, and CI/CD pipeline.
+### Phase 1: Project Setup and Infrastructure (1–2 Weeks)
+**Goal**: Establish a lightweight development environment using Docker on a work laptop (~8–12GB RAM, 4 cores), focusing on core services (PostgreSQL, Firestore emulator, Redis) and a minimal Kubernetes cluster (`kind`) to support grocery-specific features (e.g., real-time inventory, delivery slots). Defer non-essential services (Kafka, monitoring, Harbor) to later phases to reduce resource usage.
 
 | Task | Description | Duration | Dependencies | Technical Details |
 |------|-------------|----------|--------------|-------------------|
-| 1.1 Set up repo | Initialize GitHub repo, create monorepo structure (`/services`, `/docs`). | 1 day | None | Use GitHub CLI: `gh repo create grocery-ecommerce`. Structure: `/services/inventory`, `/services/order`, etc. |
-| 1.2 Configure local env | Install Docker, Kubernetes (kind/minikube), Python, Node.js, and dependencies. | 1 day | 1.1 | `poetry` for Django, `npm` for NestJS. VS Code with Python, ESLint, Docker extensions. |
-| 1.3 Set up Kubernetes | Deploy 3-master, 3-worker Kubernetes cluster on-premises. Configure NGINX Ingress. | 3 days | 1.2 | Use `kubeadm` for cluster setup. Install Helm: `helm install ingress-nginx ingress-nginx`. |
-| 1.4 Configure databases | Set up PostgreSQL (local or on-premises server) and Firestore (emulator or GCP hybrid). | 2 days | 1.2 | PostgreSQL: `docker run -d postgres:14`. Firestore: `gcloud emulators firestore start`. |
-| 1.5 Set up Kafka | Deploy Kafka with 3 brokers, replication factor of 3. | 2 days | 1.3 | Use `bitnami/kafka` Helm chart: `helm install kafka bitnami/kafka`. Create topics: `order_events`, `payment_events`. |
-| 1.6 Set up Redis | Deploy Redis for caching. | 1 day | 1.3 | `helm install redis bitnami/redis`. Configure 1GB memory limit. |
-| 1.7 Configure CI/CD | Create GitHub Actions workflows for build, test, deploy. | 3 days | 1.1, 1.3 | Workflow: lint (Flake8, ESLint), test (pytest, Jest), build/push Docker images to Harbor. See `deployment.md`. |
-| 1.8 Set up monitoring | Deploy Prometheus, Grafana, Loki, and OpenTelemetry/Jaeger. | 2 days | 1.3 | `helm install prometheus prometheus-community/kube-prometheus-stack`. Configure dashboards for CPU, latency. |
+| 1.1 Set up repo | Initialize GitHub repo, create monorepo structure (`/services`, `/docs`). | 1 day | None | Use GitHub CLI: `gh repo create grocery-ecommerce`. Structure: `/services/inventory`, `/services/order`, `/docs`. Create GitHub Project Kanban board with labels (`phase-1`, `grocery`). |
+| 1.2 Configure local env | Set up a Docker-based dev container for Python, Node.js, and dependencies. | 1 day | 1.1 | Use VS Code Dev Containers with `mcr.microsoft.com/vscode/devcontainers/javascript-node:20` + Python. Install `poetry`, `npm`. Limit container to 2GB RAM. See `.devcontainer/devcontainer.json`. |
+| 1.3 Set up Kubernetes | Deploy a minimal `kind` cluster (1 control-plane, 1 worker) for local testing. Configure NGINX Ingress. | 2 days | 1.2 | Install `kind`: `curl -Lo kind https://kind.sigs.k8s.io/dl/v0.23.0/kind-linux-amd64`. Create cluster: `kind create cluster --name grocery`. Deploy NGINX: `kubectl apply -f ingress-nginx.yaml`. Limit to ~2GB RAM. Defer on-premises cluster to Phase 6. |
+| 1.4 Configure databases | Run PostgreSQL and Firestore emulator in Docker. Seed with 100 SKUs for grocery testing. | 2 days | 1.2 | PostgreSQL: `docker run -d postgres:14-alpine` (512MB). Firestore: `docker run -d gcr.io/google.com/cloudsdktool/cloud-sdk:emulators` (512MB). Seed PostgreSQL: `INSERT INTO products (sku, name_en, name_vi, is_perishable) VALUES ('milk', 'Milk', 'Sữa', true);`. Seed Firestore: `{sku: "milk", stock: 50, expires: "2025-05-20"}`. Use `docker-compose.yml`. |
+| 1.5 Set up Redis | Run Redis for caching delivery slots. | 1 day | 1.3 | `docker run -d redis:7.0-alpine --maxmemory 512mb` (512MB). Test caching: `SET slots:2025-05-15 "{\"time\": \"10:00\", \"available\": true}"`. Include in `docker-compose.yml`. |
+| 1.6 Configure CI/CD | Create GitHub Actions workflow for build/test, using Docker Hub. | 2 days | 1.1 | Workflow: lint (Flake8, ESLint), test (pytest, Jest), build Docker images. Example: `docker build -t grocery/inventory:test`. Defer Harbor to Phase 6. See `.github/workflows/ci.yml`. |
+| 1.7 Defer Kafka | Mock event-driven logic (e.g., `OrderPlaced`) in-memory until Phase 2. | 0 days | None | Use Python `asyncio.Queue` or Node.js `EventEmitter` for local testing. Deploy Kafka (`bitnami/kafka`) in Phase 2 for Inventory service. |
+| 1.8 Defer monitoring | Use Docker logs and stats initially. Deploy Prometheus/Grafana in Phase 5. | 0 days | None | Run `docker stats` for resource monitoring. Add Prometheus (`prom/prometheus`), Grafana (`grafana/grafana`) in Phase 5 for performance testing. |
 
-**Grocery Focus**: Ensure Kafka and Firestore are ready for real-time inventory and delivery events (≤100ms, ≤500ms).
-**Output**: Repo with `/docs`, `/services`, Kubernetes cluster, CI/CD pipeline, monitoring stack.
+**Grocery Focus**:
+- **Inventory**: Seed Firestore with perishable SKUs to test ≤100ms updates (e.g., stock changes).
+- **Delivery**: Use Redis to cache mock slots (≤500ms) for same-day delivery testing.
+- **Validation**: Test database and cache performance on laptop to ensure grocery features work locally.
+
+**Resource Considerations**:
+- **Laptop Specs**: Assume ~8–12GB RAM, 4 cores. Limit containers to ~6GB total (512MB each for PostgreSQL, Firestore, Redis; 2GB for dev container; 2GB for `kind`).
+- **Monitoring**: Run `docker stats` to track CPU/RAM. Stop unused containers (`docker stop <name>`).
+- **Constraints**: Check work laptop’s IT policies for Docker/network restrictions. Use WSL2 (Windows) or Linux VM if needed.
+
+**Docker Compose Setup**:
+```yaml
+version: '3'
+services:
+  postgres:
+    image: postgres:14-alpine
+    environment:
+      POSTGRES_PASSWORD: secret
+    ports:
+      - "5432:5432"
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+  firestore-emulator:
+    image: gcr.io/google.com/cloudsdktool/cloud-sdk:emulators
+    command: gcloud beta emulators firestore start --host-port=0.0.0.0:8080
+    ports:
+      - "8080:8080"
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+  redis:
+    image: redis:7.0-alpine
+    command: redis-server --maxmemory 512mb
+    ports:
+      - "6379:6379"
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+```
+Run: `docker-compose up -d`.
+
+**Output**: GitHub repo with `/docs`, `/services`, lightweight Docker environment (PostgreSQL, Firestore emulator, Redis), minimal `kind` cluster, and CI/CD pipeline. Ready for grocery service development in Phase 2.
 
 ### Phase 2: Core Microservices Development (8–10 Weeks)
 **Goal**: Build MVP microservices (Product Catalog, Inventory, Order, Payment, User, Delivery, Notification) with basic functionality.
@@ -166,9 +210,9 @@ query GetProducts($category: String!) {
 **Output**: Enhanced platform with advanced features, ready for broader rollout.
 
 ## Timeline
-- **Total Duration**: 26–35 weeks (6–8 months) for MVP (Phases 1–6), plus 6–8 weeks for post-MVP (Phase 7).
+- **Total Duration**: 25–34 weeks (6–8 months) for MVP (Phases 1–6), plus 6–8 weeks for post-MVP (Phase 7).
 - **Breakdown**:
-  - Phase 1: 2–3 weeks
+  - Phase 1: 1–2 weeks
   - Phase 2: 8–10 weeks
   - Phase 3: 3–4 weeks
   - Phase 4: 2–3 weeks
