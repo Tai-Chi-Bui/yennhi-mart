@@ -98,39 +98,129 @@ Run: `docker-compose up -d`.
 **Output**: GitHub repo with `/docs`, `/services`, lightweight Docker environment (PostgreSQL, Firestore emulator, Redis), minimal `kind` cluster, and CI/CD pipeline. Ready for grocery service development in Phase 2.
 
 ### Phase 2: Core Microservices Development (8–10 Weeks)
-**Goal**: Build MVP microservices (Product Catalog, Inventory, Order, Payment, User, Delivery, Notification) with basic functionality.
+**Goal**: Build MVP microservices (Product Catalog, Inventory, Order, Payment, User, Delivery, Notification) with grocery-specific functionality, leveraging Phase 1’s Docker environment (PostgreSQL, Firestore emulator, Redis, `kind` cluster). Each service includes detailed API schemas, database models, Kafka integration (added in Task 2.2), and automated tests to ensure reliability on a work laptop (~8–12GB RAM, 4 cores).
 
 | Task | Description | Duration | Dependencies | Technical Details |
 |------|-------------|----------|--------------|-------------------|
-| 2.1 Product Catalog | Build service to manage 50,000 SKUs, multilingual descriptions. | 1.5 weeks | 1.4 | Django models: `Product(sku, name_en, name_vi, category)`. REST API: `/products`. PostgreSQL with GIN index for search. |
-| 2.2 Inventory | Build real-time stock management with perishable tracking. | 2 weeks | 1.4, 1.5 | NestJS, Firestore: `inventory/{sku}/{location}`. Kafka consumer for `OrderPlaced`. API: `/stock/{sku}` (≤100ms). |
-| 2.3 Order | Build cart, checkout, and order tracking. | 2 weeks | 2.1, 2.2 | Django, PostgreSQL: `Order(id, user_id, items)`. REST API: `/cart`, `/checkout`. Publish `OrderPlaced` to Kafka. |
-| 2.4 Payment | Integrate Stripe for payments. | 1 week | 2.3 | NestJS, Stripe SDK (`@stripe/stripe-js`). API: `/pay`. Store transaction IDs in PostgreSQL. Kafka for webhooks. |
-| 2.5 User | Build JWT-based authentication and profiles. | 1 week | 1.4 | Django, `djangorestframework-simplejwt`. PostgreSQL: `User(id, email, role)`. API: `/login`, `/profile`. |
-| 2.6 Delivery | Integrate Grab/ViettelPost, support same-day slots, pickup. | 1.5 weeks | 2.3 | NestJS, Firestore: `delivery/{orderId}`. API: `/slots` (≤500ms, Redis-cached). Kafka for tracking updates. |
-| 2.7 Notification | Build basic email/SMS notifications. | 1 week | 2.3, 2.6 | NestJS, Firestore for logs. Use SendGrid/Twilio. Kafka consumer for `OrderConfirmed`, `DeliveryScheduled`. |
+| 2.1 Product Catalog | Build service to manage 50,000 SKUs with multilingual descriptions and basic search. | 1.5 weeks | 1.4 | **Tech**: Django, PostgreSQL (`postgres:14-alpine`). **Models**: `Product(sku: str, name_en: str, name_vi: str, category: str, price: decimal, is_perishable: bool, expires_at: datetime)`. **API**: REST (`/products`, `/products/{sku}`) with GET endpoints. **Search**: PostgreSQL GIN index on `name_en`, `name_vi` for ≤500ms queries. **Config**: Use `django-environ` for env vars (`DATABASE_URL`). **Script**: Seed 10,000 SKUs (`scripts/seed_products.py`) with 20% perishables. **Tests**: pytest for model validation, API responses (≥80% coverage). **Grocery**: Support multilingual names, perishable flags. **Debug**: Log slow queries (>300ms) to `django.db.backends`. **Deploy**: Docker image (`grocery/product-catalog`) to `kind` cluster via Helm chart (`charts/product-catalog`). |
+| 2.2 Inventory | Build real-time stock management with perishable tracking and Kafka integration. | 2 weeks | 1.4, 1.5 | **Tech**: NestJS, Firestore emulator, Kafka (`bitnami/kafka:3.7`). **Model**: Firestore collection `inventory/{sku}/{location}` with fields `{stock: number, expires_at: timestamp}`. **API**: REST (`/stock/{sku}`, GET/POST, ≤100ms). **Kafka**: Deploy single-broker Kafka in Docker (`docker run -d bitnami/kafka`), create topic `order_events`. Consumer updates stock on `OrderPlaced`. **Logic**: Optimistic locking via Firestore transactions to prevent oversells. **Script**: Seed 10,000 SKUs (`scripts/seed_inventory.js`). **Tests**: Jest for API, transaction logic; mock Kafka with `kafkajs`. **Grocery**: Track expiration, flag low stock (<10 units). **Debug**: Log Firestore latency, Kafka consumer errors. **Deploy**: Docker image (`grocery/inventory`) to `kind`. **Resource**: Limit Kafka to 512MB RAM. |
+| 2.3 Order | Build cart, checkout, and order tracking with substitution preferences. | 2 weeks | 2.1, 2.2 | **Tech**: Django, PostgreSQL. **Models**: `Order(id: uuid, user_id: str, items: jsonb, status: str, substitution_prefs: jsonb)`, `Cart(user_id: str, items: jsonb)`. **API**: REST (`/cart`, `/checkout`, `/orders/{id}`) with POST/GET (≤1s). **Kafka**: Publish `OrderPlaced` to `order_events`. **Logic**: Validate stock via Inventory API, store substitutions (e.g., `{sku: "milk", allow: true, alt_sku: "milk2"}`). **Script**: Mock checkout flow (`scripts/test_checkout.py`). **Tests**: pytest for cart, checkout, edge cases (e.g., out-of-stock). **Grocery**: Support per-item substitutions, order status (`pending`, `fulfilled`). **Debug**: Log checkout latency (>800ms). **Deploy**: Docker image (`grocery/order`) to `kind`. |
+| 2.4 Payment | Integrate Stripe for secure payments. | 1 week | 2.3 | **Tech**: NestJS, Stripe SDK (`@stripe/stripe-js`). **Model**: PostgreSQL `Payment(id: uuid, order_id: uuid, stripe_id: str, status: str)`. **API**: REST (`/pay`, POST, ≤1s). **Kafka**: Publish `PaymentProcessed` to `payment_events`. **Logic**: Create Stripe PaymentIntent, handle webhooks (`payment_intent.succeeded`). **Script**: Test webhook handler (`scripts/test_stripe.js`). **Tests**: Jest for API, webhook parsing; mock Stripe with `stripe-mock`. **Grocery**: Ensure PCI DSS via Stripe.js. **Debug**: Log webhook failures. **Deploy**: Docker image (`grocery/payment`) to `kind`. **Resource**: Limit to 256MB RAM. |
+| 2.5 User | Build JWT-based authentication and basic profiles. | 1 week | 1.4 | **Tech**: Django, `djangorestframework-simplejwt`. **Model**: PostgreSQL `User(id: uuid, email: str, password: str, role: str, name: str)`. **API**: REST (`/login`, `/profile`, POST/GET). **Logic**: Issue JWT tokens, RBAC with roles (`customer`, `admin`). **Script**: Create test users (`scripts/seed_users.py`). **Tests**: pytest for auth, role-based access. **Grocery**: Support multilingual profile names. **Debug**: Log auth failures (e.g., invalid credentials). **Deploy**: Docker image (`grocery/user`) to `kind`. **Resource**: Limit to 256MB RAM. |
+| 2.6 Delivery | Integrate Grab/ViettelPost for same-day slots and pickup, using Redis cache. | 1.5 weeks | 2.3 | **Tech**: NestJS, Firestore, Redis (`redis:7.0-alpine`). **Model**: Firestore `delivery/{orderId}` with `{slot: timestamp, provider: str, status: str}`. **API**: REST (`/slots`, `/delivery/{orderId}`, GET/POST, ≤500ms). **Cache**: Store slots in Redis (`slots:{date}`) with 1-hour TTL. **Kafka**: Publish `DeliveryScheduled` to `delivery_events`. **Logic**: Mock Grab/ViettelPost APIs initially, fallback to next-day slots on failure. **Script**: Seed slots (`scripts/seed_slots.js`). **Tests**: Jest for slot booking, cache hits. **Grocery**: Prioritize same-day slots, support pickup. **Debug**: Log cache misses, API latency. **Deploy**: Docker image (`grocery/delivery`) to `kind`. |
+| 2.7 Notification | Build email/SMS notifications for order and delivery updates. | 1 week | 2.3, 2.6 | **Tech**: NestJS, Firestore for logs, SendGrid/Twilio. **Model**: Firestore `notifications/{id}` with `{order_id: str, type: str, status: str}`. **API**: Internal (`/notify`, POST). **Kafka**: Consume `OrderConfirmed`, `DeliveryScheduled` from `order_events`, `delivery_events`. **Logic**: Send email/SMS via SendGrid/Twilio APIs. **Script**: Test notification flow (`scripts/test_notify.js`). **Tests**: Jest for message delivery, mock SendGrid/Twilio. **Grocery**: Include substitution details in notifications. **Debug**: Log delivery failures. **Deploy**: Docker image (`grocery/notification`) to `kind`. **Resource**: Limit to 256MB RAM. |
 
 **Grocery Focus**:
-- Inventory: Implement optimistic locking in Firestore to prevent oversells, track expiration dates.
-- Delivery: Cache slots in Redis for ≤500ms responses, support same-day delivery.
-- Order: Include substitution preferences in checkout (e.g., `substitutionAllowed`).
-**Code Snippet (Inventory Service)**:
-```typescript
-// services/inventory/src/stock.controller.ts
-import { Controller, Get, Param } from '@nestjs/common';
-import { StockService } from './stock.service';
+- **Inventory**: Implement optimistic locking in Firestore to prevent oversells, track expiration dates for perishables, and flag low stock for restocking alerts.
+- **Delivery**: Cache slots in Redis for ≤500ms responses, support same-day delivery with fallback logic, and include pickup options.
+- **Order**: Include substitution preferences in checkout (e.g., `substitutionAllowed`, per-item alternates) and validate stock availability.
+- **Automation**: Use scripts (`/scripts`) to seed data and test flows, reducing manual effort for solo development.
+- **Testing**: Write unit tests for grocery-specific logic (e.g., oversell prevention, slot booking) to ensure ≥99% inventory accuracy and ≥98% slot success.
 
-@Controller('stock')
-export class StockController {
-  constructor(private readonly stockService: StockService) {}
+**Code Snippets**:
+- **Product Catalog (Django Model)**:
+  ```python
+  # services/product-catalog/product/models.py
+  from django.db import models
 
-  @Get(':sku')
-  async getStock(@Param('sku') sku: string) {
-    return this.stockService.getStock(sku); // ≤100ms, Firestore read
+  class Product(models.Model):
+      sku = models.CharField(max_length=50, unique=True)
+      name_en = models.CharField(max_length=200)
+      name_vi = models.CharField(max_length=200)
+      category = models.CharField(max_length=100)
+      price = models.DecimalField(max_digits=10, decimal_places=2)
+      is_perishable = models.BooleanField(default=False)
+      expires_at = models.DateTimeField(null=True, blank=True)
+
+      class Meta:
+          indexes = [models.Index(fields=['name_en', 'name_vi'], name='name_idx')]
+  ```
+- **Inventory (NestJS Service)**:
+  ```typescript
+  // services/inventory/src/stock.service.ts
+  import { Injectable } from '@nestjs/common';
+  import * as admin from 'firebase-admin';
+
+  @Injectable()
+  export class StockService {
+    private db = admin.firestore();
+
+    async getStock(sku: string): Promise<any> {
+      const doc = await this.db.collection('inventory').doc(sku).get();
+      if (!doc.exists) throw new Error('SKU not found');
+      return doc.data();
+    }
+
+    async updateStock(sku: string, quantity: number): Promise<void> {
+      await this.db.runTransaction(async (t) => {
+        const ref = this.db.collection('inventory').doc(sku);
+        const doc = await t.get(ref);
+        const stock = doc.data()?.stock || 0;
+        if (stock < quantity) throw new Error('Insufficient stock');
+        t.update(ref, { stock: stock - quantity });
+      });
+    }
   }
-}
-```
-**Output**: Functional MVP services with REST APIs, Kafka integration, and basic grocery features.
+  ```
+- **Order (Checkout API)**:
+  ```python
+  # services/order/order/views.py
+  from rest_framework.views import APIView
+  from rest_framework.response import Response
+  import requests
+
+  class CheckoutView(APIView):
+      def post(self, request):
+          user_id = request.user.id
+          items = request.data['items']  # [{sku, quantity, substitution_prefs}]
+          for item in items:
+              stock = requests.get(f'http://inventory:3000/stock/{item["sku"]}').json()
+              if stock['stock'] < item['quantity']:
+                  raise ValueError('Out of stock')
+          order = Order.objects.create(user_id=user_id, items=items, substitution_prefs=request.data.get('substitution_prefs'))
+          # Publish to Kafka
+          return Response({'order_id': order.id}, status=201)
+  ```
+
+**Resource Considerations**:
+- **Laptop Specs**: Use ~6–8GB RAM for Docker containers (512MB each for services, 2GB for dev container, 2GB for `kind`, 512MB for Kafka).
+- **Optimization**: Run only active service containers during development (e.g., `docker stop inventory` when testing Order). Use `docker stats` to monitor.
+- **Kafka**: Deploy single-broker Kafka in Task 2.2 with 512MB RAM to minimize overhead. Scale to 3 brokers in Phase 6.
+- **Testing**: Run tests locally in dev container to avoid CI/CD overhead. Use `pytest --cov` and `jest --coverage` for quick feedback.
+
+**Automation Scripts**:
+- **Seed Products**:
+  ```python
+  # scripts/seed_products.py
+  from product.models import Product
+  from faker import Faker
+  fake = Faker()
+
+  for i in range(10000):
+      Product.objects.create(
+          sku=f"SKU{i}",
+          name_en=fake.word(),
+          name_vi=fake.word(),
+          category=fake.word(),
+          price=fake.random_int(1, 100),
+          is_perishable=fake.random_element([True, False]),
+          expires_at=fake.date_time() if is_perishable else None
+      )
+  ```
+- **Test Slots**:
+  ```javascript
+  // scripts/seed_slots.js
+  const redis = require('redis');
+  const client = redis.createClient({ url: 'redis://localhost:6379' });
+  await client.connect();
+  await client.setEx('slots:2025-05-15', 3600, JSON.stringify([
+    { time: '10:00', available: true },
+    { time: '12:00', available: false }
+  ]));
+  await client.quit();
+  ```
+
+**Output**: Functional MVP microservices with REST APIs, Kafka integration, and grocery-specific features (e.g., perishable tracking, substitutions, same-day slots). Docker images deployed to `kind` cluster, ready for frontend integration in Phase 3.
 
 ### Phase 3: Frontend and UX (3–4 Weeks)
 **Goal**: Develop a mobile-first frontend with grocery-specific UX (search, checkout, delivery slots).
