@@ -1,69 +1,55 @@
 # Microservices
 
 ## Overview
-The platform is divided into independent microservices to ensure scalability and maintainability, each handling a specific business domain. Services use Django (transactional) or NestJS (real-time), with PostgreSQL or Firestore for persistence.
+The grocery e-commerce platform uses a microservices architecture to ensure scalability for 100,000 daily active users (DAU), 300,000 peak users, and 50,000 SKUs, with high performance (≤500ms search, ≤1s checkout, ≤100ms inventory updates, 99.9% uptime). Each service is independently deployable on Kubernetes/Docker (on-premises, future cloud migration), using Python (Django) for transactional logic or Node.js (NestJS) for real-time/event-driven tasks. Services support grocery-specific needs like real-time inventory, same-day delivery, and substitutions.
 
-## Services
-| Service | Tech Stack | Database | Responsibilities |
-|---------|------------|----------|-----------------|
-| Product Catalog | Django | PostgreSQL | Manage 50,000 SKUs, search, multilingual descriptions. |
-| Inventory | NestJS | Firestore | Real-time stock updates (≤100ms), perishables, substitutions. |
-| Order | Django | PostgreSQL | Cart, checkout (≤1s), order tracking. |
-| Payment | NestJS | PostgreSQL | Stripe integration, extensible for MoMo. |
-| User | Django | PostgreSQL | JWT auth, user profiles, RBAC. |
-| Delivery | NestJS | Firestore | Grab/ViettelPost integration, same-day slots (≤500ms). |
-| Promotions | Django | PostgreSQL | Discounts, grocery-specific promotions. |
-| Notification | NestJS | Firestore | Multilingual order/delivery updates. |
-| Search | NestJS | Elasticsearch/Firestore | Fast product search (≤500ms). |
-| Recommendation | Django | PostgreSQL/Firestore | Personalized suggestions (post-MVP). |
+## Microservices
+The following services handle distinct business domains, optimized for grocery retail:
+
+| Service            | Tech Stack       | Database      | Responsibilities                                                                 |
+|--------------------|------------------|---------------|---------------------------------------------------------------------------------|
+| Product Catalog    | Django           | PostgreSQL    | Manages 50,000 SKUs, multilingual (English/Vietnamese) descriptions, categories. |
+| Inventory          | NestJS           | Firestore     | Real-time stock updates (≤100ms), perishable tracking, substitution rules.      |
+| Order              | Django           | PostgreSQL    | Cart management, checkout (≤1s), order history, status tracking.                |
+| Payment            | NestJS           | PostgreSQL    | Processes Stripe payments, extensible for MoMo, handles refunds.                |
+| User               | Django           | PostgreSQL    | JWT-based authentication, user profiles, role-based access (customer, admin).   |
+| Delivery           | NestJS           | Firestore     | Grab/ViettelPost integration, same-day delivery slots (≤500ms), in-store pickup. |
+| Promotions         | Django           | PostgreSQL    | Discounts, coupons, perishable-specific promotions (e.g., near-expiry deals).   |
+| Notification       | NestJS           | Firestore     | Sends multilingual order/delivery updates via email, SMS, or push.              |
+| Search             | NestJS           | Elasticsearch | Fast product search (≤500ms) with filters (e.g., category, perishable).         |
+| Recommendation     | Django           | PostgreSQL    | Personalized suggestions (e.g., frequent buys), deferred for post-MVP.          |
+
+### Key Notes
+- **Django Services**: Handle transactional, ACID-compliant operations (e.g., Order, User) using PostgreSQL for reliability.
+- **NestJS Services**: Optimize for real-time, high-throughput tasks (e.g., Inventory, Delivery) with Firestore for scalability.
+- **Grocery Focus**: Inventory tracks perishables (e.g., expiration dates), Delivery supports same-day slots, and Search/Promotions enhance UX for 50,000 SKUs.
 
 ## Communication
-- **REST**: Sync calls (e.g., Order → Inventory for stock check).
-- **Kafka**: Async events (e.g., `OrderPlaced` → `StockReserved`). Topics: `payment_events`, `delivery_events`.
-- **Eventual Consistency**: Sagas for distributed transactions (e.g., rollback inventory if payment fails).
+- **REST**: Synchronous calls for immediate responses (e.g., Order Service checks Inventory stock via `/stock/{sku}`).
+- **Kafka**: Asynchronous events for decoupled workflows (e.g., `OrderPlaced` triggers `StockReserved`). Topics include `order_events`, `payment_events`, `delivery_events`.
+- **Eventual Consistency**: Use sagas to manage distributed transactions (e.g., rollback inventory if payment fails via compensating events).
+- **Service Discovery**: Kubernetes DNS resolves service endpoints (e.g., `inventory-service:8080`).
 
-## Example Kafka Event
+### Example Kafka Event
 ```json
-// Topic: order_events
 {
   "event": "OrderPlaced",
-  "orderId": "12345",
-  "items": [{"sku": "apple", "quantity": 2}],
+  "orderId": "ord-12345",
+  "userId": "usr-67890",
+  "items": [
+    {"sku": "apple", "quantity": 2, "substitutionAllowed": true}
+  ],
   "timestamp": "2025-05-14T13:00:00Z"
 }
+```
 
+## Scalability and Performance
+- **Scaling**: Each service scales independently via Kubernetes Horizontal Pod Autoscaling (HPA) based on CPU (80%) or request rate. Critical services (Inventory, Delivery) prioritize pods during 300,000-user peaks.
+- **Caching**: Redis caches frequent data (e.g., product details, stock levels) with TTLs (1–10 minutes) to reduce database load.
+- **Performance**: REST calls optimized for ≤500ms (Search), Kafka events for ≤100ms (Inventory updates), and GraphQL for efficient client queries (≤1s checkout).
 
----
-
-#### File 4: `docs/scalability.md`
-```markdown
-# Scalability
-
-## Overview
-The platform is designed to handle 100,000 DAU and 300,000 peak users, with plans for growth beyond (e.g., millions of users, 100,000+ SKUs, new regions).
-
-## Strategies
-- **Horizontal Scaling**:
-  - Kubernetes HPA: Scale pods based on CPU/memory (80% threshold) or request rate.
-  - Cluster Autoscaler: Add nodes during peaks (e.g., 500,000 users).
-  - Split services (e.g., Search Indexing, Order Processing) for load distribution.
-- **Database Scaling**:
-  - **PostgreSQL**: 2–3 read replicas for reads, partitioning by date/user, sharding (Citus) for millions of orders.
-  - **Firestore**: Auto-scaling, optimized collections (e.g., `inventory/{sku}/{region}`), Redis caching for reads.
-- **Caching**: Redis for hot data (e.g., stock, slots) with TTLs (1–10 minutes).
-- **CDN**: Cloudflare/CloudFront for static assets and cached GraphQL responses.
-- **Load Balancing**: Kubernetes Ingress (NGINX), future cloud load balancers (AWS ALB).
-
-## Regional Expansion
-- On-premises: Simulate regions with separate clusters (e.g., Hanoi, HCMC) and data replication.
-- Cloud: Multi-region deployment (e.g., AWS Singapore, US) with global load balancing (AWS Global Accelerator).
-- Multilingual: Extend Django i18n/NestJS `i18next` for new languages (e.g., Thai).
-
-## New Features
-- Modular microservices (e.g., Loyalty, Subscription) using NestJS.
-- Feature flags (Django `waffle`) for incremental rollout.
-- Extensible schemas in PostgreSQL/Firestore (e.g., `loyalty_points` table).
-
-## Monitoring
-- Prometheus/Grafana to forecast traffic (e.g., 1M users).
-- Locust for capacity testing (e.g., 500,000-user simulation).
+## Best Practices
+- **Modularity**: Services are loosely coupled, with clear APIs (REST/GraphQL) and event schemas (Kafka).
+- **Testing**: Unit tests (pytest, Jest), integration tests (Testcontainers), and E2E tests (Cypress) per service, run via GitHub Actions.
+- **Monitoring**: Log service interactions to Loki, track metrics (e.g., latency, errors) in Prometheus/Grafana, with alerts for failures.
+- **Cloud Prep**: Use cloud-agnostic configs (e.g., environment variables) for future migration to AWS EKS/GCP GKE.
